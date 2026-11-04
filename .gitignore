@@ -1,0 +1,40 @@
+# Output files
+*.md
+!README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+secrets.json
+credentials.json
+config.local.*
+
+# Debug / temp files
+debug_html.html
+debug_postman.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
