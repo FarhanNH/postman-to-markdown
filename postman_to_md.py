@@ -1,10 +1,15 @@
 """
-Postman Documenter to Markdown Converter (v2 - API Intercept)
-Intercepts Postman's internal API calls via Playwright to get full collection data.
+Postman Documenter to Markdown Converter (v3 - Cross-platform)
+Intercepts Postman's internal API via Playwright headless browser.
+
+Supports: Windows, macOS, Linux | Python 3.8+
 
 Usage:
     python postman_to_md.py <postman_url> [output_file.md]
     python postman_to_md.py --json collection.json [output_file.md]
+
+Example:
+    python postman_to_md.py "https://documenter.getpostman.com/view/17351666/2sBYHSzgaB" api_docs.md
 """
 
 import sys
@@ -12,14 +17,25 @@ import re
 import json
 import argparse
 from pathlib import Path
+from typing import Optional, Tuple
 
-def _ensure(pkg, import_name=None):
-    import importlib, subprocess
+# ── Python version check ──────────────────────────────────────────────────────
+if sys.version_info < (3, 8):
+    sys.exit("[ERROR] Python 3.8 or higher is required.")
+
+
+# ── Dependency bootstrap ──────────────────────────────────────────────────────
+def _ensure(pkg: str, import_name: Optional[str] = None) -> None:
+    import importlib
+    import subprocess
     try:
         importlib.import_module(import_name or pkg)
     except ImportError:
-        print(f"[*] Installing {pkg}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", pkg])
+        print("[*] Installing {}...".format(pkg))
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet", pkg]
+        )
+
 
 _ensure("requests")
 _ensure("beautifulsoup4", "bs4")
@@ -29,20 +45,21 @@ import requests
 from bs4 import BeautifulSoup
 
 
-# ─── Postman internal API fetch ───────────────────────────────────────────────
+# ── Playwright fetch + API intercept ─────────────────────────────────────────
 
-def fetch_collection_via_playwright(url: str) -> tuple[dict | None, dict | None]:
+def fetch_collection_via_playwright(url: str) -> Tuple[Optional[dict], Optional[dict]]:
     """
-    Open the Postman Documenter page in a headless browser,
-    intercept the two internal API calls:
-      - /api/collections/...  -> collection JSON
-      - /api/examples/...     -> examples JSON
+    Open the Postman Documenter page in a headless browser and intercept
+    two internal API calls:
+      - /api/collections/...  -> full collection structure
+      - /api/examples/...     -> example responses per endpoint
+
     Returns (collection_data, examples_data).
     """
     from playwright.sync_api import sync_playwright
 
-    collection_data = None
-    examples_data = None
+    collection_data: Optional[dict] = None
+    examples_data: Optional[dict] = None
 
     print("[*] Launching headless browser...")
 
@@ -50,7 +67,7 @@ def fetch_collection_via_playwright(url: str) -> tuple[dict | None, dict | None]
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        def on_response(response):
+        def on_response(response):  # type: ignore
             nonlocal collection_data, examples_data
             r_url = response.url
             try:
@@ -58,12 +75,12 @@ def fetch_collection_via_playwright(url: str) -> tuple[dict | None, dict | None]
                     body = response.body()
                     if body:
                         collection_data = json.loads(body.decode("utf-8"))
-                        print(f"  [+] Captured collection API: {r_url[:80]}...")
+                        print("  [+] Captured collection: {}...".format(r_url[:80]))
                 elif "/api/examples/" in r_url:
                     body = response.body()
                     if body:
                         examples_data = json.loads(body.decode("utf-8"))
-                        print(f"  [+] Captured examples API: {r_url[:80]}...")
+                        print("  [+] Captured examples:   {}...".format(r_url[:80]))
             except Exception:
                 pass
 
@@ -75,17 +92,18 @@ def fetch_collection_via_playwright(url: str) -> tuple[dict | None, dict | None]
     return collection_data, examples_data
 
 
-# ─── Markdown generator ───────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def slug(text: str) -> str:
+    """Convert text to a GitHub-compatible Markdown anchor slug."""
     return re.sub(r"[^\w\s-]", "", text).strip().lower().replace(" ", "-")
 
 
-def build_examples_map(examples_data: dict | None) -> dict:
+def build_examples_map(examples_data: Optional[dict]) -> dict:
     """Build a map of item_id -> list of example responses."""
     if not examples_data or "data" not in examples_data:
         return {}
-    mapping = {}
+    mapping: dict = {}
     for entry in examples_data.get("data", []):
         iid = entry.get("item_id")
         if iid:
@@ -93,32 +111,51 @@ def build_examples_map(examples_data: dict | None) -> dict:
     return mapping
 
 
-def collection_to_markdown(collection: dict, examples_map: dict, source_url: str) -> str:
+def resolve_collection(raw: dict) -> Optional[dict]:
+    """Find the collection object inside various possible JSON wrappers."""
+    if "collection" in raw:
+        col = raw["collection"]
+        if isinstance(col, dict) and "info" in col:
+            return col
+    if "info" in raw and "item" in raw:
+        return raw
+    # Deep search
+    for v in raw.values():
+        if isinstance(v, dict) and "info" in v and "item" in v:
+            return v
+    return None
+
+
+# ── Markdown generator ────────────────────────────────────────────────────────
+
+def collection_to_markdown(
+    collection: dict, examples_map: dict, source_url: str
+) -> str:
     info = collection.get("info", {})
     title = info.get("name", "API Documentation")
     description = info.get("description", "")
 
-    lines = [f"# {title}\n"]
+    lines = ["# {}\n".format(title)]
     if description:
-        lines.append(f"{description}\n")
-    lines.append(f"> Source: {source_url}\n")
+        lines.append("{}\n".format(description))
+    lines.append("> Source: {}\n".format(source_url))
     lines.append("---\n")
 
-    toc: list[str] = []
-    body: list[str] = []
+    toc: list = []
+    body: list = []
 
-    def process_item(item: dict, depth: int = 2):
+    def process_item(item: dict, depth: int = 2) -> None:
         name = item.get("name", "Unnamed")
         sub_items = item.get("item", [])
         item_id = item.get("id", "")
 
         if sub_items:
             indent = "  " * (depth - 2)
-            toc.append(f"{indent}- [{name}](#{slug(name)})")
-            body.append(f"\n{'#' * depth} {name}\n")
+            toc.append("{}- [{}](#{})".format(indent, name, slug(name)))
+            body.append("\n{} {}\n".format("#" * depth, name))
             desc = item.get("description", "")
             if desc:
-                body.append(f"{desc}\n")
+                body.append("{}\n".format(desc))
             for sub in sub_items:
                 process_item(sub, depth + 1)
             return
@@ -130,9 +167,10 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
 
         method = request.get("method", "GET").upper()
         url_obj = request.get("url", {})
+
         if isinstance(url_obj, str):
             url_raw = url_obj
-            query_params = []
+            query_params: list = []
         elif isinstance(url_obj, dict):
             url_raw = url_obj.get("raw", "")
             if not url_raw:
@@ -141,7 +179,7 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
                     p if isinstance(p, str) else p.get("value", str(p))
                     for p in url_obj.get("path", [])
                 )
-                url_raw = f"{host}/{path}" if host else f"/{path}"
+                url_raw = "{}/{}".format(host, path) if host else "/{}".format(path)
             query_params = url_obj.get("query", [])
         else:
             url_raw = ""
@@ -152,20 +190,18 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
         req_body = request.get("body", {})
 
         indent = "  " * (depth - 2)
-        toc.append(f"{indent}- [{name}](#{slug(name)})")
-
-        body.append(f"\n{'#' * depth} {name}\n")
-        body.append(f"**Method:** `{method}`  ")
-        body.append(f"**URL:** `{url_raw}`\n")
+        toc.append("{}- [{}](#{})".format(indent, name, slug(name)))
+        body.append("\n{} {}\n".format("#" * depth, name))
+        body.append("**Method:** `{}`  ".format(method))
+        body.append("**URL:** `{}`\n".format(url_raw))
 
         if req_desc:
-            body.append(f"\n{req_desc}\n")
+            body.append("\n{}\n".format(req_desc))
 
         # Auth
         auth = request.get("auth")
         if auth and isinstance(auth, dict):
-            auth_type = auth.get("type", "")
-            body.append(f"\n**Auth:** `{auth_type}`\n")
+            body.append("\n**Auth:** `{}`\n".format(auth.get("type", "")))
 
         # Query params
         active_params = [q for q in query_params if not q.get("disabled")]
@@ -174,9 +210,9 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
             body.append("| Key | Value | Description |")
             body.append("|-----|-------|-------------|")
             for q in active_params:
-                body.append(
-                    f"| `{q.get('key','')}` | `{q.get('value','')}` | {q.get('description','')} |"
-                )
+                body.append("| `{}` | `{}` | {} |".format(
+                    q.get("key", ""), q.get("value", ""), q.get("description", "")
+                ))
             body.append("")
 
         # Headers
@@ -186,7 +222,9 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
             body.append("| Key | Value |")
             body.append("|-----|-------|")
             for h in active_headers:
-                body.append(f"| `{h.get('key','')}` | `{h.get('value','')}` |")
+                body.append("| `{}` | `{}` |".format(
+                    h.get("key", ""), h.get("value", "")
+                ))
             body.append("")
 
         # Request body
@@ -194,10 +232,14 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
             mode = req_body.get("mode", "")
             if mode == "raw":
                 raw = req_body.get("raw", "").strip()
-                lang = req_body.get("options", {}).get("raw", {}).get("language", "json")
+                lang = (
+                    req_body.get("options", {})
+                    .get("raw", {})
+                    .get("language", "json")
+                )
                 if raw:
-                    body.append(f"\n**Request Body ({mode}):**\n")
-                    body.append(f"```{lang}")
+                    body.append("\n**Request Body ({}):**\n".format(mode))
+                    body.append("```{}".format(lang))
                     body.append(raw)
                     body.append("```\n")
             elif mode == "formdata":
@@ -207,9 +249,9 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
                     body.append("| Key | Value | Type |")
                     body.append("|-----|-------|------|")
                     for fd in fds:
-                        body.append(
-                            f"| `{fd.get('key','')}` | `{fd.get('value','')}` | {fd.get('type','text')} |"
-                        )
+                        body.append("| `{}` | `{}` | {} |".format(
+                            fd.get("key", ""), fd.get("value", ""), fd.get("type", "text")
+                        ))
                     body.append("")
             elif mode == "urlencoded":
                 ues = [u for u in req_body.get("urlencoded", []) if not u.get("disabled")]
@@ -218,7 +260,9 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
                     body.append("| Key | Value |")
                     body.append("|-----|-------|")
                     for ue in ues:
-                        body.append(f"| `{ue.get('key','')}` | `{ue.get('value','')}` |")
+                        body.append("| `{}` | `{}` |".format(
+                            ue.get("key", ""), ue.get("value", "")
+                        ))
                     body.append("")
             elif mode == "graphql":
                 gql = req_body.get("graphql", {})
@@ -233,114 +277,114 @@ def collection_to_markdown(collection: dict, examples_map: dict, source_url: str
                     body.append(gql["variables"].strip())
                     body.append("```\n")
 
-        # Example responses (from intercepted examples API)
+        # Example responses
         examples = examples_map.get(item_id, [])
-        # Also check inline responses
         inline_responses = item.get("response", [])
         all_responses = examples + inline_responses
 
         if all_responses:
             body.append("\n**Example Responses:**\n")
             for ex in all_responses:
-                if "response" in ex:  # from examples API
+                if "response" in ex:
                     resp = ex["response"]
                     ex_name = ex.get("name", "Response")
                     resp_body_text = resp.get("body", "")
                     resp_code = resp.get("code", "")
                     resp_status = resp.get("status", "")
-                else:  # inline response
+                else:
                     ex_name = ex.get("name", "Response")
                     resp_body_text = ex.get("body", "")
                     resp_code = ex.get("code", "")
                     resp_status = ex.get("status", "")
 
-                body.append(f"**{ex_name}**" + (f" — `{resp_code} {resp_status}`" if resp_code else "") + "\n")
+                label = "**{}**".format(ex_name)
+                if resp_code:
+                    label += " -- `{} {}`".format(resp_code, resp_status)
+                body.append("{}\n".format(label))
+
                 if resp_body_text:
-                    # Try to detect if it's JSON
                     lang = "json"
                     try:
                         json.loads(resp_body_text)
                     except Exception:
                         lang = "text"
-                    body.append(f"```{lang}")
+                    body.append("```{}".format(lang))
                     body.append(resp_body_text.strip())
                     body.append("```\n")
 
     for item in collection.get("item", []):
         process_item(item, depth=2)
 
-    # Assemble
     if toc:
         lines.append("## Table of Contents\n")
         lines.extend(toc)
         lines.append("")
+
     lines.extend(body)
     return "\n".join(lines)
 
 
-# ─── entry points ─────────────────────────────────────────────────────────────
+# ── Entry points ──────────────────────────────────────────────────────────────
 
 def convert(url: str, output_path: str) -> None:
     collection_data, examples_data = fetch_collection_via_playwright(url)
 
     if not collection_data:
-        print("[ERROR] Could not capture collection data from Postman API.")
-        print("  Make sure the collection is publicly visible.")
-        sys.exit(1)
+        sys.exit(
+            "[ERROR] Could not capture collection data.\n"
+            "Make sure the collection is publicly accessible."
+        )
 
-    # The collection API may return {"collection": {...}} or the collection directly
-    if "collection" in collection_data:
-        collection = collection_data["collection"]
-    elif "info" in collection_data:
-        collection = collection_data
-    else:
-        # Try to find it
-        for v in collection_data.values():
-            if isinstance(v, dict) and "info" in v:
-                collection = v
-                break
-        else:
-            print("[ERROR] Unexpected collection JSON structure.")
-            print(json.dumps(collection_data, indent=2)[:500])
-            sys.exit(1)
+    collection = resolve_collection(collection_data)
+    if not collection:
+        sys.exit(
+            "[ERROR] Unexpected collection JSON structure:\n"
+            + json.dumps(collection_data, indent=2)[:400]
+        )
 
-    print(f"[*] Collection: {collection.get('info', {}).get('name', '(unknown)')}")
-    print(f"[*] Items: {len(collection.get('item', []))}")
+    print("[*] Collection : {}".format(collection.get("info", {}).get("name", "(unknown)")))
+    print("[*] Top-level items: {}".format(len(collection.get("item", []))))
 
     examples_map = build_examples_map(examples_data)
-    print(f"[*] Example responses mapped: {len(examples_map)} endpoints")
+    print("[*] Example responses mapped: {} endpoints".format(len(examples_map)))
 
     markdown = collection_to_markdown(collection, examples_map, url)
-
     out = Path(output_path)
     out.write_text(markdown, encoding="utf-8")
-    print(f"[OK] Saved to: {out.resolve()}")
+    print("[OK] Saved to: {}".format(out.resolve()))
 
 
 def convert_from_json(json_path: str, output_path: str, source_url: str = "") -> None:
-    print(f"[*] Reading: {json_path}")
+    print("[*] Reading: {}".format(json_path))
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    if "collection" in data:
-        collection = data["collection"]
-    elif "info" in data:
-        collection = data
-    else:
-        collection = data
+    collection = resolve_collection(data) or data
     markdown = collection_to_markdown(collection, {}, source_url or json_path)
     out = Path(output_path)
     out.write_text(markdown, encoding="utf-8")
-    print(f"[OK] Saved to: {out.resolve()}")
+    print("[OK] Saved to: {}".format(out.resolve()))
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a public Postman Documenter URL to Markdown."
     )
-    parser.add_argument("input", help="Postman Documenter URL or Collection JSON path (--json)")
-    parser.add_argument("output", nargs="?", default="api_docs.md", help="Output .md file")
-    parser.add_argument("--json", action="store_true", help="Input is a local Postman Collection JSON file")
+    parser.add_argument(
+        "input",
+        help="Postman Documenter URL  OR  path to Postman Collection JSON (use --json)",
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default="api_docs.md",
+        help="Output Markdown file (default: api_docs.md)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Treat INPUT as a local Postman Collection JSON file",
+    )
     args = parser.parse_args()
 
     if args.json:

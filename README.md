@@ -4,6 +4,10 @@ Convert a **public Postman Documenter URL** into a clean, structured **Markdown 
 
 > Works with any public collection at `https://documenter.getpostman.com/view/...`
 
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 ---
 
 ## How It Works
@@ -19,18 +23,20 @@ This approach is more reliable than HTML scraping because the data comes directl
 
 ## Requirements
 
-- **Python** 3.10 or higher
-- **pip** (bundled with Python)
-- Internet connection
-- A **public** Postman Documenter URL
+| Requirement | Version |
+|-------------|---------|
+| Python | **3.8 or higher** |
+| pip | bundled with Python |
+| Internet | required |
+| Postman collection | must be **publicly accessible** |
 
 ### Python packages
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `requests` | ≥ 2.28 | HTTP fetching fallback |
-| `beautifulsoup4` | ≥ 4.12 | HTML parsing fallback |
-| `playwright` | ≥ 1.40 | Headless browser / JS rendering |
+| `requests` | >= 2.28 | HTTP fetching fallback |
+| `beautifulsoup4` | >= 4.12 | HTML parsing fallback |
+| `playwright` | >= 1.40 | Headless browser / JS rendering |
 
 > The script will auto-install missing packages on first run. See manual install below.
 
@@ -49,7 +55,11 @@ cd postman-to-markdown
 
 ```bash
 python -m venv venv
+```
 
+Activate it:
+
+```bash
 # Windows
 venv\Scripts\activate
 
@@ -57,7 +67,7 @@ venv\Scripts\activate
 source venv/bin/activate
 ```
 
-### 3. Install dependencies
+### 3. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -69,7 +79,15 @@ pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-That's it — no API keys or authentication required.
+#### Linux only — install system dependencies
+
+On Linux, Chromium requires additional system libraries:
+
+```bash
+python -m playwright install-deps chromium
+```
+
+> This step is **not needed** on Windows or macOS.
 
 ---
 
@@ -122,7 +140,7 @@ The generated Markdown file contains:
 
 **Example output structure:**
 
-```
+```markdown
 # My API Collection
 
 > Source: https://documenter.getpostman.com/...
@@ -152,7 +170,7 @@ The generated Markdown file contains:
 
 **Example Responses:**
 
-**200 - OK**
+**200 OK**
 ```json
 { "token": "eyJ..." }
 ```
@@ -160,10 +178,21 @@ The generated Markdown file contains:
 
 ---
 
+## Platform Compatibility
+
+| OS | Status | Notes |
+|----|--------|-------|
+| Windows 10/11 | Supported | No extra steps |
+| macOS (Intel & Apple Silicon) | Supported | No extra steps |
+| Linux (Ubuntu, Debian, CentOS, etc.) | Supported | Run `playwright install-deps chromium` |
+| Linux (Docker / CI) | Supported | Use `--no-sandbox` if needed (headless mode) |
+
+---
+
 ## Limitations
 
 - Only works with **publicly accessible** Postman collections (no login required to view).
-- Postman renders its documentation via JavaScript — a headless browser is required. Pure HTTP fetch is attempted first as a faster fallback.
+- Postman renders its documentation via JavaScript — a headless browser is required.
 - Rate limiting by Postman may apply if many requests are made in a short time.
 
 ---
